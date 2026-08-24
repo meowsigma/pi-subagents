@@ -6208,6 +6208,11 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		authorities: readonly AuthorizedLaunchAuthority[],
 	): Promise<LaunchAuthorityLane[]> => {
 		if (authorities.length === 0) return [];
+		// A controlled resume has no public agent/task fields to preflight. Its
+		// exact target request is bound by the rpc.resume digest; Ultra's durable
+		// lease journal supplies the matching authority lane. Generic resumes
+		// still arrive without a permit and are denied before this boundary.
+		if (params.action === "resume") return authorities[0]?.lanes.map((lane) => ({ ...lane, modelCandidates: [...lane.modelCandidates] })) ?? [];
 		const defaults = { ...params } as Record<string, unknown>;
 		delete defaults.workflowScript;
 		delete defaults.action;
