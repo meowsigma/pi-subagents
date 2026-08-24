@@ -435,7 +435,7 @@ async function executeChecked(
 	launchPermits: readonly string[] = [],
 ): Promise<{ text: string; details?: Details; isError?: boolean }> {
 	assertSubagentParams(params, `RPC ${method} params`);
-	if (launchPermits.length > 0) bindSubagentLaunchPermits(params, launchPermits, "rpc.spawn");
+	if (launchPermits.length > 0) bindSubagentLaunchPermits(params, launchPermits, method === "resume" ? "rpc.resume" : "rpc.spawn");
 	const controller = new AbortController();
 	const result = await options.execute(`rpc-${method}-${requestId}`, params, controller.signal, undefined, ctx);
 	failIfToolError(result);
@@ -810,14 +810,14 @@ async function handleRequest(
 		return stopAsyncRun(request.params, options, ctx);
 	}
 	if (request.method === "resume") {
-		return executeChecked(options, ctx, request.requestId, request.method, resumeParams(request.params));
+		return executeChecked(options, ctx, request.requestId, request.method, resumeParams(request.params), request.authorization?.launchPermits);
 	}
 	throw new SubagentRpcError("unsupported_method", `Unsupported subagent RPC method: ${String(request.method)}`);
 }
 
 function parseAuthorization(value: unknown, method: SubagentRpcMethod): SubagentRpcRequestEnvelope["authorization"] {
 	if (value === undefined) return undefined;
-	if (method !== "spawn") throw new SubagentRpcError("invalid_request", "RPC authorization is supported only for spawn.");
+	if (method !== "spawn" && method !== "resume") throw new SubagentRpcError("invalid_request", "RPC authorization is supported only for spawn or controlled resume.");
 	if (!isRecord(value) || Object.keys(value).some((key) => key !== "launchPermits")) {
 		throw new SubagentRpcError("invalid_request", "RPC authorization must contain only launchPermits.");
 	}

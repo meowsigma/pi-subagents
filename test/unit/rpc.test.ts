@@ -15,7 +15,7 @@ import {
 	type SubagentRpcReplyEnvelope,
 } from "../../src/extension/rpc.ts";
 import { SUBAGENT_CHILD_STATUS_EVENT, type Details, type SubagentChildStatusEvent, type SubagentState } from "../../src/shared/types.ts";
-import { takeBoundSubagentLaunchPermits } from "../../src/runs/shared/launch-authority.ts";
+import { takeBoundSubagentLaunchAuthorization, takeBoundSubagentLaunchPermits } from "../../src/runs/shared/launch-authority.ts";
 
 class FakeEvents {
 	readonly emitted: Array<{ event: string; data: unknown }> = [];
@@ -775,6 +775,25 @@ describe("subagent extension RPC bridge", () => {
 		});
 		assert.equal((reply as { data: { details?: { asyncId?: string } } }).data.details?.asyncId, "run-2");
 
+		bridge.dispose();
+	});
+
+	it("binds resume permits in a distinct controlled-resume domain", async () => {
+		const events = new FakeEvents();
+		let authorization: unknown;
+		const bridge = registerSubagentRpcBridge({
+			events,
+			getContext: () => ctx(),
+			execute: async (_id, params) => {
+				authorization = takeBoundSubagentLaunchAuthorization(params);
+				return { content: [{ type: "text", text: "resumed" }], details: {} } as any;
+			},
+		});
+		const reply = await request(events, "resume-auth", "resume", { id: "run-1", message: "continue" }, { launchPermits: ["resume-token"] });
+		assert.equal(reply.success, true);
+		assert.deepEqual(authorization, { permits: ["resume-token"], domain: "rpc.resume" });
+		const denied = await request(events, "resume-auth-extra", "resume", { id: "run-1", message: "continue" }, { launchPermits: ["resume-token"], extra: true });
+		assert.equal(denied.success, false);
 		bridge.dispose();
 	});
 
