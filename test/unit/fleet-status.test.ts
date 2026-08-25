@@ -9,6 +9,7 @@ import { collectFleetSnapshot } from "../../src/tui/fleet.ts";
 import {
 	FLEET_STATUS_WIDGET_KEY,
 	SubagentFleetStatus,
+	registerSubagentFleetPin,
 	collectFleetStatusEntries,
 	formatFleetElapsed,
 	formatFleetTokens,
@@ -50,6 +51,22 @@ describe("below-editor subagent FleetView", () => {
 		assert.equal(formatFleetTokens(999), "↓ 999 tokens");
 		assert.equal(formatFleetTokens(13_100), "↓ 13.1k tokens");
 		assert.equal(formatFleetTokens(1_250_000), "↓ 1.3M tokens");
+	});
+
+	it("keeps extension-owned Ultra role pins visible in the persistent FleetView", () => {
+		const handles = [
+			registerSubagentFleetPin({ sessionId: "session-current", pin: { key: "pi-ultra:scout", agent: "ultra-scout", description: "Ultra scout" } }),
+			registerSubagentFleetPin({ sessionId: "session-current", pin: { key: "pi-ultra:worker", agent: "ultra-worker", description: "Ultra worker" } }),
+		];
+		try {
+			const entries = collectFleetStatusEntries(stateForTest());
+			assert.deepEqual(entries.filter((entry) => entry.pinned).map((entry) => [entry.agent, entry.description, entry.state]), [
+				["ultra-scout", "Ultra scout", "pinned"],
+				["ultra-worker", "Ultra worker", "pinned"],
+			]);
+		} finally {
+			handles.forEach((handle) => handle.dispose());
+		}
 	});
 
 	it("renders cached external jobs with an external marker and elapsed time", () => {
