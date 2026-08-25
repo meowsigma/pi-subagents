@@ -25,6 +25,12 @@ test("rejects empty, sequential, dynamic, spread, non-literal, duplicate, and ex
 	]) assert.throws(() => parseStaticRunsAllWorkflow(script), /static|runs\.all|literal|duplicate|exactly one|at least one/i, script);
 });
 
+test("preserves explicit per-child tool allowlists for governed workflows", () => {
+	const parsed = parseStaticRunsAllWorkflow("return await runs.all([{key:'scout',agent:'ultra-scout',task:'Inspect',tools:['read','grep','find','ls']},{key:'worker',agent:'ultra-worker',task:'Implement',tools:['read','bash','edit','write']}]);");
+	assert.deepEqual(parsed[0]?.params.tools, ['read', 'grep', 'find', 'ls']);
+	assert.deepEqual(parsed[1]?.params.tools, ['read', 'bash', 'edit', 'write']);
+});
+
 test("rejects unsupported child keys and values that are not strict JSON literals", () => {
 	assert.throws(() => parseStaticRunsAllWorkflow("return await runs.all([{key:'a',agent:'worker',unknown:true}]);"), /unsupported child field/i);
 	assert.throws(() => parseStaticRunsAllWorkflow("return await runs.all([{key:'a',agent:'worker',task:undefined}]);"), /literal/i);

@@ -6,7 +6,7 @@ const MAX_CHILDREN = 256;
 const ALLOWED_CHILD_FIELDS = new Set([
 	"key", "agent", "task", "resume", "model", "context", "cwd", "worktree", "output", "outputMode",
 	"skill", "thinking", "fast", "timeoutMs", "maxRuntimeMs", "toolTimeoutMs", "turnBudget", "toolBudget",
-	"usageBudget", "acceptance", "gate", "artifacts", "share", "sessionDir", "agentScope", "outputSchema",
+	"usageBudget", "acceptance", "gate", "artifacts", "share", "sessionDir", "agentScope", "outputSchema", "tools",
 	"extensionBindings", "mission", "missionId", "phase", "label", "control", "chatProgress",
 ]);
 

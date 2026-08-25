@@ -6,6 +6,13 @@ import type { AsyncJobState, AsyncJobStep, FleetViewPlacement, HerdrProjectPaneS
 import { formatWorkflowJsonPreview } from "../workflows/scripted-workflow.ts";
 
 export const FLEET_STATUS_WIDGET_KEY = "subagent-fleet-status";
+const FLEET_PIN_REGISTRY_KEY = Symbol.for("pi-subagents.fleet-pins.v1");
+
+type FleetPinRegistry = Map<string, Map<string, FleetPin>>;
+function fleetPinRegistry(): FleetPinRegistry {
+	const root = globalThis as typeof globalThis & { [FLEET_PIN_REGISTRY_KEY]?: FleetPinRegistry };
+	return root[FLEET_PIN_REGISTRY_KEY] ??= new Map();
+}
 
 // Six rows fit the accepted collapsed hierarchy: one owner, four visible descendants, and overflow.
 const MAX_AGENT_ROWS = 6;
@@ -17,6 +24,7 @@ type FleetStatusTui = {
 };
 type FleetStatusEntry = {
 	key: string;
+	pinned?: true;
 	surface?: "project-pane";
 	parentKey?: string;
 	workflowWrapper?: boolean;
@@ -62,6 +70,40 @@ export interface FleetStatusOptions {
 	refreshMs?: number;
 	maxAgentRows?: number;
 	placement?: FleetViewPlacement;
+}
+
+export interface FleetPin {
+	key: string;
+	agent: string;
+	description?: string;
+}
+
+export interface FleetPinHandle {
+	dispose(): void;
+}
+
+/** Register a persistent status row in the stock FleetView for an extension-owned agent. */
+export function registerSubagentFleetPin(input: { sessionId: string; pin: FleetPin }): FleetPinHandle {
+	if (!input.sessionId.trim() || !input.pin.key.trim() || !input.pin.agent.trim()) throw new Error("Fleet pin requires a session, key, and agent.");
+	const registry = fleetPinRegistry();
+	const session = registry.get(input.sessionId) ?? new Map<string, FleetPin>();
+	registry.set(input.sessionId, session);
+	const pin = { key: input.pin.key, agent: input.pin.agent, ...(input.pin.description ? { description: input.pin.description } : {}) };
+	session.set(pin.key, pin);
+	let disposed = false;
+	return {
+		dispose() {
+		if (disposed) return;
+		disposed = true;
+		session.delete(pin.key);
+		if (session.size === 0) registry.delete(input.sessionId);
+		},
+	};
+}
+
+function fleetPinsForSession(sessionId: string | null): FleetPin[] {
+	if (!sessionId) return [];
+	return [...(fleetPinRegistry().get(sessionId)?.values() ?? [])].sort((left, right) => left.key.localeCompare(right.key));
 }
 
 export function resolveFleetViewPlacement(value: unknown): FleetViewPlacement {
@@ -286,7 +328,7 @@ function foregroundDescription(control: { parentWorkflowRunId?: string; workflow
 }
 
 function activeLeafAgentCount(entries: FleetStatusEntry[]): number {
-	return entries.filter((entry) => !entry.workflowWrapper && !entry.surface).length;
+	return entries.filter((entry) => !entry.pinned && !entry.workflowWrapper && !entry.surface).length;
 }
 
 function projectPaneNeedsAttention(pane: HerdrProjectPaneSnapshot): boolean {
@@ -433,8 +475,18 @@ export function collectFleetStatusEntries(state: SubagentState): FleetStatusEntr
 		}
 	}
 
+	const now = Date.now();
+	for (const pin of fleetPinsForSession(state.currentSessionId)) entries.push({
+		key: `pinned:${pin.key}`,
+		pinned: true,
+		agent: pin.agent,
+		description: pin.description,
+		startedAt: now,
+		tokens: 0,
+		state: "pinned",
+	});
 	entries.push(...projectPaneEntries(state));
-	return entries.sort((left, right) => left.startedAt - right.startedAt || left.key.localeCompare(right.key));
+	return entries.sort((left, right) => Number(Boolean(left.pinned)) - Number(Boolean(right.pinned)) || left.startedAt - right.startedAt || left.key.localeCompare(right.key));
 }
 
 export class SubagentFleetStatus {
@@ -610,9 +662,10 @@ export class SubagentFleetStatus {
 		if (!this.active) {
 			const workEntries = this.entries.filter((entry) => !entry.surface);
 			const projectEntries = this.entries.filter((entry) => entry.surface === "project-pane");
+			const pinnedEntries = workEntries.filter((entry) => entry.pinned);
 			const tokens = workEntries.reduce((total, entry) => total + entry.tokens, 0);
 			const capacity = this.state.activeAsyncCapacity;
-			const hasNativeRows = workEntries.some((entry) => !entry.external);
+			const hasNativeRows = workEntries.some((entry) => !entry.external && !entry.pinned);
 			const showNativeSummary = hasNativeRows || Boolean(capacity?.used);
 			const asyncRuns = capacity && showNativeSummary ? `Async runs ${capacity.used}/${capacity.limit || "∞"}` : "";
 			const activeEntries = activeLeafAgentCount(workEntries);
@@ -620,7 +673,8 @@ export class SubagentFleetStatus {
 			const agents = activeEntries > 0 ? `${activeEntries} active ${noun}${activeEntries === 1 ? "" : "s"}` : "";
 			const paneAttention = projectEntries.filter((entry) => entry.projectPane && projectPaneNeedsAttention(entry.projectPane)).length;
 			const panes = projectEntries.length > 0 ? `${projectEntries.length} pane${projectEntries.length === 1 ? "" : "s"}${paneAttention ? ` (${paneAttention} ⚠)` : ""}` : "";
-			const label = [agents, asyncRuns, panes].filter(Boolean).join(" · ");
+			const pinned = pinnedEntries.length > 0 ? `${pinnedEntries.length} Ultra agent${pinnedEntries.length === 1 ? "" : "s"} pinned` : "";
+			const label = [pinned, agents, asyncRuns, panes].filter(Boolean).join(" · ");
 			const detail = [showNativeSummary ? formatFleetTokens(tokens) : undefined, "↓/← to inspect"].filter(Boolean).join(" · ");
 			return [truncateToWidth(`  ${theme.fg("muted", label)}${label && detail ? " · " : ""}${theme.fg("dim", detail)}`, width)];
 		}
