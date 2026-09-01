@@ -107,6 +107,8 @@ type EditableOverrideField = "model" | "thinking" | "systemPrompt";
 
 type AgentSelection =
 	| { kind: "selected"; agent: AgentConfig }
+	| { kind: "all"; agents: AgentConfig[] }
+	| { kind: "all-empty" }
 	| { kind: "cancelled" }
 	| { kind: "not-found"; agents: AgentConfig[]; requestedName?: string }
 	| { kind: "ambiguous"; requestedName: string; matches: AgentConfig[] };
@@ -154,6 +156,16 @@ async function selectAgent(ctx: ExtensionContext, args: string): Promise<AgentSe
 	if (agents.length === 0) return { kind: "not-found", agents, requestedName: requestedName || undefined };
 
 	if (requestedName) {
+		// Bulk-apply selector: "/subagents all [action]" applies to every builtin
+		// subagent. Only the literal keyword "all" triggers this — agents named "all"
+		// would conflict, but that's an exotic edge case and the project docs
+		// already promise this command.
+		if (requestedName.toLowerCase() === "all") {
+			const builtins = agents.filter((agent) => agent.source === "builtin");
+			return builtins.length > 0
+				? { kind: "all", agents: builtins }
+				: { kind: "all-empty" };
+		}
 		const matches = agents.filter((agent) => agentMatches(agent, requestedName));
 		if (matches.length === 1) return { kind: "selected", agent: matches[0]! };
 		if (matches.length > 1 && !ctx.hasUI) return { kind: "ambiguous", requestedName, matches };
@@ -278,9 +290,9 @@ function persistSettingsField(
 	};
 }
 
-async function saveAgentModel(ctx: ExtensionContext, agent: AgentConfig, selectedModel: string | undefined): Promise<string | null> {
+async function saveAgentModel(ctx: ExtensionContext, agent: AgentConfig, selectedModel: string | undefined, forcedScope?: "user" | "project"): Promise<string | null> {
 	if (savesThroughSettings(agent, "model")) {
-		const scope = await chooseOverrideScope(ctx, agent);
+		const scope = forcedScope ?? await chooseOverrideScope(ctx, agent);
 		if (!scope) return null;
 		const { filePath, overridden } = persistSettingsField(ctx, agent, scope, "model", selectedModel);
 		return overridden
@@ -365,11 +377,128 @@ async function editSystemPrompt(ctx: ExtensionContext, agent: AgentConfig): Prom
 	return saveAgentSystemPrompt(ctx, agent, edited);
 }
 
+async function administerAllBuiltins(pi: ExtensionAPI, ctx: ExtensionContext, args: string, builtinAgents: AgentConfig[]): Promise<void> {
+	if (builtinAgents.length === 0) {
+		sendAdminMessage(pi, "No builtin subagents to administer.");
+		return;
+	}
+
+	if (!ctx.hasUI) {
+		// Destructive bulk write — refuse in headless mode to avoid surprising file edits.
+		sendAdminMessage(
+			pi,
+			`Bulk apply requested for ${builtinAgents.length} builtin subagent(s) but no UI is available. Run interactively to apply.\n\nTargets:\n${builtinAgents.map((agent) => `- ${agent.name} (${agent.source}, model: ${agent.model ?? "default / inherit"})`).join("\n")}`,
+		);
+		return;
+	}
+
+	// Resolve the override scope once for the whole bulk operation. If every
+	// builtin already shares the same effective scope, reuse it; otherwise ask.
+	const explicitScopes = new Set(
+		builtinAgents
+			.map((agent) => agent.override?.scope)
+			.filter((value): value is "user" | "project" => value !== undefined),
+	);
+	let scope: "user" | "project" | undefined;
+	if (explicitScopes.size === 1) {
+		scope = [...explicitScopes][0];
+	} else {
+		const choice = await ctx.ui.select(
+			`Bulk apply to ${builtinAgents.length} builtin subagents — choose override scope`,
+			["user", "project"],
+		);
+		if (choice !== "user" && choice !== "project") return;
+		scope = choice;
+	}
+
+	// Pick the action. Honor the second token from args (e.g. "model", "details")
+	// and otherwise show a small picker.
+	const requestedAction = args.trim().split(/\s+/)[1]?.toLowerCase();
+	let action: string | undefined;
+	if (requestedAction === "model") action = "Apply model to all";
+	else if (requestedAction === "details" || requestedAction === "info") action = "Show details";
+	else if (
+		requestedAction === "thinking" ||
+		requestedAction === "prompt" ||
+		requestedAction === "system-prompt" ||
+		requestedAction === "edit"
+	) {
+		sendAdminMessage(
+			pi,
+			`Bulk '${requestedAction}' is not supported yet — use single-agent admin (e.g. '/subagents <name> ${requestedAction}') for each role, or run '/subagents <name> ${requestedAction}' individually.`,
+		);
+		return;
+	}
+	if (!action) {
+		action = await ctx.ui.select(
+			`Administer all ${builtinAgents.length} builtin subagents (scope: ${scope})`,
+			["Apply model to all", "Show details", "Done"],
+		);
+	}
+	if (!action || action === "Done") return;
+
+	if (action === "Show details") {
+		const lines = builtinAgents
+			.map((agent) => {
+				const thinking = agent.thinking === false ? "off" : agent.thinking ?? "default / inherit";
+				return `- ${agent.name} · model: ${agent.model ?? "default / inherit"} · thinking: ${thinking} · source: ${agent.source}`;
+			})
+			.join("\n");
+		sendAdminMessage(pi, `Builtin subagents (${builtinAgents.length}):\n${lines}`);
+		return;
+	}
+
+	if (action === "Apply model to all") {
+		// Use the first agent only as the "current" indicator in the picker.
+		const representative = builtinAgents[0]!;
+		const selectedModel = await chooseModel(ctx, representative);
+		if (selectedModel === null) return; // user cancelled the picker
+
+		const target = selectedModel ?? INHERIT_MODEL_CHOICE;
+		const results: { name: string; ok: boolean; message: string }[] = [];
+		for (const agent of builtinAgents) {
+			try {
+				const message = await saveAgentModel(ctx, agent, selectedModel, scope);
+				if (message === null) {
+					results.push({ name: agent.name, ok: false, message: "cancelled (no scope)" });
+					continue;
+				}
+				results.push({ name: agent.name, ok: true, message });
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				results.push({ name: agent.name, ok: false, message });
+			}
+		}
+
+		const okCount = results.filter((r) => r.ok).length;
+		const summary =
+			`Bulk model update to '${target}' (${scope}): ${okCount}/${results.length} succeeded.\n\n` +
+			results.map((r) => `- ${r.name}: ${r.ok ? "✓" : "✗"} ${r.message}`).join("\n");
+		ctx.ui.notify(
+			`Bulk update: ${okCount}/${results.length} succeeded.`,
+			okCount === results.length ? "info" : "warning",
+		);
+		sendAdminMessage(pi, summary);
+		return;
+	}
+}
+
 export async function openSubagentsAdmin(pi: ExtensionAPI, ctx: ExtensionContext, args = ""): Promise<void> {
 	const selection = await selectAgent(ctx, args);
 	if (selection.kind === "cancelled") return;
 	if (selection.kind === "ambiguous") {
 		sendAdminMessage(pi, `Subagent '${selection.requestedName}' is ambiguous. Choose a scope in interactive mode:\n${selection.matches.map((agent) => `- ${agent.source}: ${agent.filePath}`).join("\n")}`);
+		return;
+	}
+	if (selection.kind === "all-empty") {
+		sendAdminMessage(
+			pi,
+			`No builtin subagents are currently visible — bulk apply has no targets.\n\nAvailable subagents:\n${allVisibleAgents(ctx.cwd).map((agent) => `- ${agent.name} (${agent.source})`).join("\n") || "- (none)"}`,
+		);
+		return;
+	}
+	if (selection.kind === "all") {
+		await administerAllBuiltins(pi, ctx, args, selection.agents);
 		return;
 	}
 	if (selection.kind === "not-found") {
